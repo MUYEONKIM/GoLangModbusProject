@@ -201,10 +201,7 @@ func MaxOfSensorData(reg64s []uint16, currentTime time.Time, maxData maxDataStru
 func ReadModbus(device *Device) {
 	// fmt.Printf("%+v \n %+v \n", device, device.DeviceInfo)
 
-	// maxValues의 정적 길이 할당 이지만 (sql에서 가져온 데이터의 길이만큼 동적 할당)
-	var maxData = maxDataStruct{
-		maxValues: make([]uint16, 0, device.dvcInfo.quantity),
-	}
+	var maxData = maxDataStruct{}
 	var sendMaxDataChan = make(chan maxDataStruct, 1)
 
 	defer device.ticker.Stop()
@@ -233,7 +230,7 @@ func ReadModbus(device *Device) {
 					*storageData = copyData
 				}
 					
-				maxData.maxValues = make([]uint16, device.dvcInfo.quantity)
+				maxData.maxValues = make([]uint16, 0)
 				maxData.maxTimestamp = time.Time{}
 			}
 		}
@@ -273,7 +270,7 @@ func SensorBatchInsert(batchsize int) {
 	fmt.Printf("%+v", shardMap.Items())
 	
 	for key, value := range shardMap.Items() {
-		// basequery := "INSERT INTO storage (dvc_id, address, value, timestamp, datasavedtime) VALUES "
+		basequery := "INSERT INTO storage (dvc_id, address, value, timestamp, datasavedtime) VALUES "
 		db := value
 		
 		wg.Add(1)
@@ -290,9 +287,8 @@ func SensorBatchInsert(batchsize int) {
 					shardDevideStorage, _ := shardStorage.Get(key)
 					StorageLen := shardDevideStorage.Count()
 
-
 						if StorageLen > 0 {
-							// currentTime := time.Now()
+							currentTime := time.Now()
 							var batchwg sync.WaitGroup
 							
 							if StorageLen > batchsize {
@@ -323,64 +319,47 @@ func SensorBatchInsert(batchsize int) {
 									// 여기부터
 									batchwg.Add(1)
 									go func(startIdx int, endIdx int) {
-										// var values []interface{}
-										// var addQueryParameter []string
-										// 일단 go 함수가 종료되면 여기가 자동 gc로 초기화가 되기는 하는데 여기 유념해보기
-										// values := make([]interface{}, 0, (endIdx - startIdx) * 5)
-										// addQueryParameter := make([]string, 0, endIdx - startIdx)
-
+										var values []interface{}
+										var addQueryParameter []string
+										
 										defer batchwg.Done()
 
-										totalItems := 0
 										for i := startIdx; i < endIdx; i++ {
 											key := deviceKeys[i]
-											device , _ := Device_Clients.Get(key)
-											totalItems += device.dvcInfo.quantity
+											value, _ := shardDevideStorage.Get(key)
+											// value := Storage[key]
+											timeStamp := value.maxTimestamp
+											for i, snsrValue := range value.maxValues {
+												addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+												address := 1300 + i
+												values = append(values, 
+													key, 
+													address,
+													snsrValue,
+													timeStamp,
+													currentTime,
+												)
+											}
 										}
 										
-										// 미리 용량 할당
-										addQueryParameter := make([]string, 0, totalItems)
-										values := make([]interface{}, 0, totalItems * 5) // 각 항목당 5개 값
-
-										fmt.Println(cap(addQueryParameter), "batch")
-										fmt.Println(cap(values), "batch")
-										// for i := startIdx; i < endIdx; i++ {
-										// 	key := deviceKeys[i]
-										// 	value, _ := shardDevideStorage.Get(key)
-										// 	// value := Storage[key]
-										// 	timeStamp := value.maxTimestamp
-										// 	for i, snsrValue := range value.maxValues {
-										// 		addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
-										// 		address := 1300 + i
-										// 		values = append(values, 
-										// 			key, 
-										// 			address,
-										// 			snsrValue,
-										// 			timeStamp,
-										// 			currentTime,
-										// 		)
-										// 	}
-										// }
-										// // fmt.Println(len(values))
-										// // fmt.Println(len(addQueryParameter))
-										// // 현재 배치 데이터 저장
-										// if len(values) > 0 {
-										// 	// fmt.Println(len(addQueryParameter))
+										// 현재 배치 데이터 저장
+										if len(values) > 0 {
+											fmt.Println(len(addQueryParameter))
 				
-										// 	sql := basequery + strings.Join(addQueryParameter, ", ")
-										// 	stmt, err := db.Prepare(sql)
-										// 	// fmt.Println("배치", b+1, "/", batchCount, "- query갯수:", len(addQueryParameter), "values갯수:", len(values))
-										// 	if err != nil {
-										// 		log.Fatal(key, err, "batch sql insert error 입니다")
-										// 	}
+											sql := basequery + strings.Join(addQueryParameter, ", ")
+											stmt, err := db.Prepare(sql)
+											// fmt.Println("배치", b+1, "/", batchCount, "- query갯수:", len(addQueryParameter), "values갯수:", len(values))
+											if err != nil {
+												log.Fatal(key, err, "batch sql insert error 입니다")
+											}
 											
-										// 	_, err = stmt.Exec(values...)
-										// 	if err != nil {
-										// 		fmt.Println(err)
-										// 		log.Fatal(key, err, "batch sql insert error 입니다")
-										// 	}
-										// 	stmt.Close() 
-										// }
+											_, err = stmt.Exec(values...)
+											if err != nil {
+												fmt.Println(err)
+												log.Fatal(key, err, "batch sql insert error 입니다")
+											}
+											stmt.Close() 
+										}
 									}(startIdx, endIdx)
 									// 현재 배치에 속한 디바이스만 처리
 									
@@ -388,55 +367,40 @@ func SensorBatchInsert(batchsize int) {
 									// 여기까지?
 								}
 							} else {
-								// values := make([]interface{}, 0, (endIdx - startIdx) * 5)
-								// addQueryParameter := make([]string, 0, endIdx - startIdx)
-								// var values []interface{}
-								// var addQueryParameter []string
-
-								totalItems := 0
-								for key, _ := range shardDevideStorage.Items() {
-									device , _ := Device_Clients.Get(key)
-									totalItems += device.dvcInfo.quantity
-								}
+								var values []interface{}
+								var addQueryParameter []string
 								
-								// 미리 용량 할당
-								addQueryParameter := make([]string, 0, totalItems)
-								values := make([]interface{}, 0, totalItems * 5) 
+								for key, value := range shardDevideStorage.Items() {
+									timeStamp := value.maxTimestamp
+									for i, snsrValue := range value.maxValues {
+										addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+										address := 1300 + i
+										values = append(values, 
+											key, 
+											address,
+											snsrValue,
+											timeStamp,
+											currentTime,
+										)
+									}
+								}
+								// 전체 데이터 다 저장
+								if len(values) > 0 {
+									// fmt.Println(len(addQueryParameter))
 
-								fmt.Println(cap(addQueryParameter))
-								fmt.Println(cap(values))
-						
-								// for key, value := range shardDevideStorage.Items() {
-								// 	timeStamp := value.maxTimestamp
-								// 	for i, snsrValue := range value.maxValues {
-								// 		addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
-								// 		address := 1300 + i
-								// 		values = append(values, 
-								// 			key, 
-								// 			address,
-								// 			snsrValue,
-								// 			timeStamp,
-								// 			currentTime,
-								// 		)
-								// 	}
-								// }
-								// // 전체 데이터 다 저장
-								// if len(values) > 0 {
-								// 	// fmt.Println(len(addQueryParameter))
-
-								// 	sql := basequery + strings.Join(addQueryParameter, ", ")
-								// 	stmt, err := db.Prepare(sql)
-								// 	if err != nil {
-								// 		log.Fatal(err)
-								// 	}
-								// 	defer stmt.Close()
+									sql := basequery + strings.Join(addQueryParameter, ", ")
+									stmt, err := db.Prepare(sql)
+									if err != nil {
+										log.Fatal(err)
+									}
+									defer stmt.Close()
 									
-								// 	_, err = stmt.Exec(values...)
-								// 	if err != nil {
-								// 		fmt.Println(err)
-								// 		log.Fatal(err)
-								// 	}
-								// }
+									_, err = stmt.Exec(values...)
+									if err != nil {
+										fmt.Println(err)
+										log.Fatal(err)
+									}
+								}
 							}
 						}
 					}
