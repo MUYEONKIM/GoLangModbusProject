@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strconv"
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"go.mongodb.org/mongo-driver/bson"
+	// "go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -378,7 +377,6 @@ func SensorBatchInsert(batchsize int) {
 		for key, value := range shardMap.Items() {
 			// basequery := "INSERT INTO storage (dvc_id, address, value, timestamp, datasavedtime) VALUES "
 			db := value
-			mongoCollection := db.Collection("StorageTest")
 			shardDBSaveWaitGroup.Add(1)
 			go func(db *mongo.Database, shardKey string){
 				defer shardDBSaveWaitGroup.Done()
@@ -389,13 +387,15 @@ func SensorBatchInsert(batchsize int) {
 						fmt.Println("Stop Save for shard key:", shardKey)
 						return 
 					default:
+						// sleep를 처음에 주는 이유는, 마지막에 존재할 시, 처음에 값을 storage에 저장 시키기도 전에 실행을 먼저 시켜서 첫번째 maxdata가 유실이 되버림
+						// 그래서 처음에 0.3초를 먼저 기다린 후에 저장 로직을 하도록 해야 첫번재 maxdata가 저장이 됨
 						time.Sleep(300000 * time.Microsecond)
 						shardDevideStorage, _ := shardStorage.Get(shardKey)
 						StorageLen := shardDevideStorage.Count()
 
 
 						if StorageLen > 0 {
-							currentTime := time.Now()
+							// currentTime := time.Now()
 							
 							if StorageLen > batchsize {
 								
@@ -420,71 +420,98 @@ func SensorBatchInsert(batchsize int) {
 										endIdx = StorageLen
 									}
 									
+									fmt.Println(endIdx - startIdx)
 									// 여기부터
-									go func(startIdx int, endIdx int) {
-										values := make([]interface{}, 0, endIdx - startIdx) // 각 항목당 5개 값
-										for i := startIdx; i < endIdx; i++ {
-											key := deviceKeys[i]
-											value, _ := shardDevideStorage.Get(key)
-											device , _ := Device_Clients.Get(key)
-											timeStamp := value.maxTimestamp
-											var snsrData bson.D
-											for valIdx , snsrValue := range value.maxValues {
-												address := strconv.Itoa(device.dvcInfo.dvc_remap + valIdx)
-												snsrData = append(snsrData,
-													bson.E{address, snsrValue},
-												)
-											}
+									// go func(startIdx int, endIdx int) {
 
-											values = append(values, 
-												bson.D{
-													{"DeviceId" , key}, 
-													{"TimeStamp" , timeStamp}, 
-													{"DataSavedTime", currentTime} ,
-													{"Value", snsrData},
-												},
-											)
-										}
+									// 	// totalItems := 0
+									// 	// for i := startIdx; i < endIdx; i++ {
+									// 	// 	key := deviceKeys[i]
+									// 	// 	device , _ := Device_Clients.Get(key)
+									// 	// 	totalItems += device.dvcInfo.quantity
+									// 	// }
 
-										_, err := mongoCollection.InsertMany(ctx, values)
-										if err != nil {
-											log.Fatal(err)
-										}
+										
+									// 	// 미리 용량 할당
+									// 	values := make([]interface{}, 0, totalItems * 5) // 각 항목당 5개 값
+										
+									// 	for i := startIdx; i < endIdx; i++ {
+									// 		key := deviceKeys[i]
+									// 		value, _ := shardDevideStorage.Get(key)
+									// 		device , _ := Device_Clients.Get(key)
+									// 		timeStamp := value.maxTimestamp
+									// 		for valIdx , snsrValue := range value.maxValues {
+									// 			addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+									// 			address := device.dvcInfo.dvc_remap + valIdx
+									// 			values = append(values, 
+									// 				key, 
+									// 				address,
+									// 				snsrValue,
+									// 				timeStamp,
+									// 				currentTime,
+									// 			)
+									// 		}
+									// 	}
 
-										values = nil
-									}(startIdx, endIdx)
+									// 	// 현재 배치 데이터 저장
+									// 	if len(values) > 0 {
+									// 		sql := basequery + strings.Join(addQueryParameter, ", ")
+									// 		tx, err := db.Begin()
+									// 		if err != nil {
+									// 			log.Printf("트랜잭션 시작 오류: %v", err)
+									// 			return
+									// 		}
+											
+									// 		_, err = tx.Exec(sql, values...)
+									// 		if err != nil {
+									// 			tx.Rollback() // 오류 발생 시 롤백
+									// 			log.Printf("배치 SQL 삽입 오류: %v", err)
+									// 			return
+									// 		}
+											
+									// 		err = tx.Commit() // 트랜잭션 커밋
+									// 		if err != nil {
+									// 			log.Printf("트랜잭션 커밋 오류: %v", err)
+									// 			return
+									// 		}
+									// 		fmt.Println("배치한번에 태워진 파라미터개수 : ", len(values))
+
+									// 		addQueryParameter = nil
+									// 		values = nil
+									// 	}
+									// }(startIdx, endIdx)
+									// 현재 배치에 속한 디바이스만 처리
+									
+
+									// 여기까지?
 								}
 							} else {
-								values := make([]interface{}, 0, shardDevideStorage.Count()) // 각 항목당 5개 값
+								// totalItems := 0
+								// for key, _ := range shardDevideStorage.Items() {
+								// 	device , _ := Device_Clients.Get(key)
+								// 	totalItems += device.dvcInfo.quantity
+								// }
+								
+								// // 미리 용량 할당
+								// addQueryParameter := make([]string, 0, totalItems)
+								// values := make([]interface{}, 0, totalItems * 5) 
 						
-								for key, value := range shardDevideStorage.Items() {
-									timeStamp := value.maxTimestamp
-									device , _ := Device_Clients.Get(key)
-									var snsrData bson.D
+								// for key, value := range shardDevideStorage.Items() {
+								// 	timeStamp := value.maxTimestamp
+								// 	device , _ := Device_Clients.Get(key)
 
-									for valIdx , snsrValue := range value.maxValues {
-										address := strconv.Itoa(device.dvcInfo.dvc_remap + valIdx)
-										snsrData = append(snsrData,
-											bson.E{address, snsrValue},
-										)
-									}
-
-									values = append(values, 
-										bson.D{
-											{"DeviceId" , key}, 
-											{"TimeStamp" , timeStamp}, 
-											{"DataSavedTime", currentTime} ,
-											{"Value", snsrData},
-										},
-									)
-								}
-
-								_, err := mongoCollection.InsertMany(ctx, values)
-								if err != nil {
-									log.Fatal(err)
-								}
-
-								values = nil
+								// 	for i, snsrValue := range value.maxValues {
+								// 		addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+								// 		address := device.dvcInfo.dvc_remap + i
+								// 		values = append(values, 
+								// 			key, 
+								// 			address,
+								// 			snsrValue,
+								// 			timeStamp,
+								// 			currentTime,
+								// 		)
+								// 	}
+								// }
 								// // 전체 데이터 다 저장
 								// if len(values) > 0 {
 								// 	sql := basequery + strings.Join(addQueryParameter, ", ")

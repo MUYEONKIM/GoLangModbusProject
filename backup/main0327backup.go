@@ -5,23 +5,14 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"strconv"
-
-	_ "github.com/go-sql-driver/mysql"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
-
-	// "math"
 	"os"
-	// "strconv"
+	"strconv"
 
 	"strings"
 	"sync"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gofiber/fiber/v3"
 	"github.com/joho/godotenv"
 	cmap "github.com/orcaman/concurrent-map/v2"
@@ -78,8 +69,7 @@ var (
 
 	// Device_Clients = make(map[string]*Device)
 	Device_Clients = cmap.New[*Device]()
-	mysqlDBMap = cmap.New[*sql.DB]()
-	shardMap = cmap.New[*mongo.Database]()
+	shardMap = cmap.New[*sql.DB]()
 	// 채널관리
 	DeviceReadChan = make(chan bool)
 	saveSnsrChan = make(chan SensorData, 1)
@@ -287,17 +277,7 @@ func ReadModbus(device *Device) {
 			case result := <- sendMaxDataChan:
 				maxData = result
 			case <- readTicker.C:
-				// var sumHarmonicData float64
 				copyData := maxData
-				 
-				// THD DATA
-				// basicCurrHarmonicData, currHarmonicData := maxData.maxValues[61], maxData.maxValues[62: 81]
-
-
-				// for _, v := range currHarmonicData {
-				// 	sumHarmonicData += math.Pow(float64(v), 2)
-				// }
-				// currTHD := math.Sqrt(sumHarmonicData) / float64(basicCurrHarmonicData) * 100
 
 				if _, exist := shardBuffer.Get(DvcId); !exist {
 					shardBuffer.Set(DvcId, &copyData)
@@ -365,7 +345,7 @@ func ReadModbus(device *Device) {
 }
 
 func SensorBatchInsert(batchsize int) {
-	var shardDBSaveWaitGroup sync.WaitGroup
+	// var shardDBSaveWaitGroup sync.WaitGroup
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -376,12 +356,12 @@ func SensorBatchInsert(batchsize int) {
 	// 여기서 shard key가 구분이 되어야 함
 	// 이보다 상위로 가게되면 그만큼의 go routine이 생겨버림
 		for key, value := range shardMap.Items() {
-			// basequery := "INSERT INTO storage (dvc_id, address, value, timestamp, datasavedtime) VALUES "
+			basequery := "INSERT INTO storage (dvc_id, address, value, timestamp, datasavedtime) VALUES "
 			db := value
-			mongoCollection := db.Collection("StorageTest")
-			shardDBSaveWaitGroup.Add(1)
-			go func(db *mongo.Database, shardKey string){
-				defer shardDBSaveWaitGroup.Done()
+			// shardDBSaveWaitGroup.Add(1)
+			go func(db *sql.DB, shardKey string){
+				// defer shardDBSaveWaitGroup.Done()
+
 				
 				for {
 					select {
@@ -389,6 +369,8 @@ func SensorBatchInsert(batchsize int) {
 						fmt.Println("Stop Save for shard key:", shardKey)
 						return 
 					default:
+						// sleep를 처음에 주는 이유는, 마지막에 존재할 시, 처음에 값을 storage에 저장 시키기도 전에 실행을 먼저 시켜서 첫번째 maxdata가 유실이 되버림
+						// 그래서 처음에 0.3초를 먼저 기다린 후에 저장 로직을 하도록 해야 첫번재 maxdata가 저장이 됨
 						time.Sleep(300000 * time.Microsecond)
 						shardDevideStorage, _ := shardStorage.Get(shardKey)
 						StorageLen := shardDevideStorage.Count()
@@ -396,6 +378,7 @@ func SensorBatchInsert(batchsize int) {
 
 						if StorageLen > 0 {
 							currentTime := time.Now()
+							var batchwg sync.WaitGroup
 							
 							if StorageLen > batchsize {
 								
@@ -410,8 +393,10 @@ func SensorBatchInsert(batchsize int) {
 								if StorageLen % batchsize > 0 {
 									batchCount++
 								}
+								
 								// 배치 단위로 처리
 								for b := 0; b < batchCount; b++ {
+
 									
 									// 현재 배치의 시작 및 끝 인덱스 계산
 									startIdx := b * batchsize
@@ -421,105 +406,133 @@ func SensorBatchInsert(batchsize int) {
 									}
 									
 									// 여기부터
+									batchwg.Add(1)
 									go func(startIdx int, endIdx int) {
-										values := make([]interface{}, 0, endIdx - startIdx) // 각 항목당 5개 값
+										defer batchwg.Done()
+
+										totalItems := 0
+										for i := startIdx; i < endIdx; i++ {
+											key := deviceKeys[i]
+											device , _ := Device_Clients.Get(key)
+											totalItems += device.dvcInfo.quantity
+										}
+
+										
+										// 미리 용량 할당
+										addQueryParameter := make([]string, 0, totalItems)
+										values := make([]interface{}, 0, totalItems * 5) // 각 항목당 5개 값
+										
 										for i := startIdx; i < endIdx; i++ {
 											key := deviceKeys[i]
 											value, _ := shardDevideStorage.Get(key)
 											device , _ := Device_Clients.Get(key)
 											timeStamp := value.maxTimestamp
-											var snsrData bson.D
 											for valIdx , snsrValue := range value.maxValues {
-												address := strconv.Itoa(device.dvcInfo.dvc_remap + valIdx)
-												snsrData = append(snsrData,
-													bson.E{address, snsrValue},
+												addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+												address := device.dvcInfo.dvc_remap + valIdx
+												values = append(values, 
+													key, 
+													address,
+													snsrValue,
+													timeStamp,
+													currentTime,
 												)
 											}
-
-											values = append(values, 
-												bson.D{
-													{"DeviceId" , key}, 
-													{"TimeStamp" , timeStamp}, 
-													{"DataSavedTime", currentTime} ,
-													{"Value", snsrData},
-												},
-											)
 										}
 
-										_, err := mongoCollection.InsertMany(ctx, values)
-										if err != nil {
-											log.Fatal(err)
-										}
+										// 현재 배치 데이터 저장
+										if len(values) > 0 {
+											sql := basequery + strings.Join(addQueryParameter, ", ")
+											tx, err := db.Begin()
+											if err != nil {
+												log.Printf("트랜잭션 시작 오류: %v", err)
+												return
+											}
+											
+											_, err = tx.Exec(sql, values...)
+											if err != nil {
+												tx.Rollback() // 오류 발생 시 롤백
+												log.Printf("배치 SQL 삽입 오류: %v", err)
+												return
+											}
+											
+											err = tx.Commit() // 트랜잭션 커밋
+											if err != nil {
+												log.Printf("트랜잭션 커밋 오류: %v", err)
+												return
+											}
 
-										values = nil
+											addQueryParameter = nil
+											values = nil
+										}
 									}(startIdx, endIdx)
+									// 현재 배치에 속한 디바이스만 처리
+									
+
+									// 여기까지?
 								}
+								batchwg.Wait()
 							} else {
-								values := make([]interface{}, 0, shardDevideStorage.Count()) // 각 항목당 5개 값
+								totalItems := 0
+								for key, _ := range shardDevideStorage.Items() {
+									device , _ := Device_Clients.Get(key)
+									totalItems += device.dvcInfo.quantity
+								}
+								
+								// 미리 용량 할당
+								addQueryParameter := make([]string, 0, totalItems)
+								values := make([]interface{}, 0, totalItems * 5) 
 						
 								for key, value := range shardDevideStorage.Items() {
 									timeStamp := value.maxTimestamp
 									device , _ := Device_Clients.Get(key)
-									var snsrData bson.D
 
-									for valIdx , snsrValue := range value.maxValues {
-										address := strconv.Itoa(device.dvcInfo.dvc_remap + valIdx)
-										snsrData = append(snsrData,
-											bson.E{address, snsrValue},
+									for i, snsrValue := range value.maxValues {
+										addQueryParameter = append(addQueryParameter, "(?, ?, ?, ?, ?)")
+										address := device.dvcInfo.dvc_remap + i
+										values = append(values, 
+											key, 
+											address,
+											snsrValue,
+											timeStamp,
+											currentTime,
 										)
 									}
-
-									values = append(values, 
-										bson.D{
-											{"DeviceId" , key}, 
-											{"TimeStamp" , timeStamp}, 
-											{"DataSavedTime", currentTime} ,
-											{"Value", snsrData},
-										},
-									)
 								}
+								// 전체 데이터 다 저장
+								if len(values) > 0 {
+									sql := basequery + strings.Join(addQueryParameter, ", ")
 
-								_, err := mongoCollection.InsertMany(ctx, values)
-								if err != nil {
-									log.Fatal(err)
-								}
-
-								values = nil
-								// // 전체 데이터 다 저장
-								// if len(values) > 0 {
-								// 	sql := basequery + strings.Join(addQueryParameter, ", ")
-
-								// 	tx, err := db.Begin()
-								// 	if err != nil {
-								// 		log.Printf("트랜잭션 시작 오류: %v", err)
-								// 		continue
-								// 	}
+									tx, err := db.Begin()
+									if err != nil {
+										log.Printf("트랜잭션 시작 오류: %v", err)
+										continue
+									}
 									
-								// 	_, err = tx.Exec(sql, values...)
-								// 	if err != nil {
-								// 		tx.Rollback()
-								// 		log.Printf("SQL 삽입 오류: %v", err)
-								// 		continue
-								// 	}
+									_, err = tx.Exec(sql, values...)
+									if err != nil {
+										tx.Rollback()
+										log.Printf("SQL 삽입 오류: %v", err)
+										continue
+									}
 									
-								// 	err = tx.Commit() 
-								// 	if err != nil {
-								// 		log.Printf("트랜잭션 커밋 오류: %v", err)
-								// 		continue
-								// 	}
-
-								// 	fmt.Println("배치한번에 태워진 파라미터개수 : ", len(values))
+									err = tx.Commit() 
+									if err != nil {
+										log.Printf("트랜잭션 커밋 오류: %v", err)
+										continue
+									}
 									
-								// 	addQueryParameter = nil
-								// 	values = nil
+									addQueryParameter = nil
+									values = nil
 								}
 							}
 				
 						}
 					}
+				}
 		}(db, key)
 	}
-	shardDBSaveWaitGroup.Wait()
+	// shardDBSaveWaitGroup.Wait()
 }
 
 
@@ -539,81 +552,46 @@ func main() {
 	DB_PASSWORD := os.Getenv("DB_PASSWORD")
 	DB_DATABASE := os.Getenv("DB_DATABASE")
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_DATABASE)
-	
-	mysqlDB, err := sql.Open("mysql", dsn)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err = mysqlDB.Ping(); err != nil {
-		log.Fatal(err)
-	}
-
-	if _, exist := mysqlDBMap.Get("MYSQL_DB"); !exist {
-		mysqlDBMap.Set("MYSQL_DB", mysqlDB)
-	}
-
-	// SHARD_ONE_DB_HOST := os.Getenv("SHARD_ONE_DB_HOST")
-	// SHARD_ONE_DB_PORT := os.Getenv("SHARD_ONE_DB_PORT")
-	// SHARD_ONE_DB_USER := os.Getenv("SHARD_ONE_DB_USER")
-	// SHARD_ONE_DB_PASSWORD := os.Getenv("SHARD_ONE_DB_PASSWORD")
-	// SHARD_ONE_DB_DATABASE := os.Getenv("SHARD_ONE_DB_DATABASE")
+	SHARD_ONE_DB_HOST := os.Getenv("SHARD_ONE_DB_HOST")
+	SHARD_ONE_DB_PORT := os.Getenv("SHARD_ONE_DB_PORT")
+	SHARD_ONE_DB_USER := os.Getenv("SHARD_ONE_DB_USER")
+	SHARD_ONE_DB_PASSWORD := os.Getenv("SHARD_ONE_DB_PASSWORD")
+	SHARD_ONE_DB_DATABASE := os.Getenv("SHARD_ONE_DB_DATABASE")
 
 	// SHARD_TWO_DB_HOST := os.Getenv("SHARD_TWO_DB_HOST")
 	// SHARD_TWO_DB_PORT := os.Getenv("SHARD_TWO_DB_PORT")
 	// SHARD_TWO_DB_USER := os.Getenv("SHARD_TWO_DB_USER")
 	// SHARD_TWO_DB_PASSWORD := os.Getenv("SHARD_TWO_DB_PASSWORD")
 	// SHARD_TWO_DB_DATABASE := os.Getenv("SHARD_TWO_DB_DATABASE")
-	// dsns := []string{
-	// 	fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", SHARD_ONE_DB_USER, SHARD_ONE_DB_PASSWORD, SHARD_ONE_DB_HOST, SHARD_ONE_DB_PORT, SHARD_ONE_DB_DATABASE),
-	// 	// fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", SHARD_TWO_DB_USER, SHARD_TWO_DB_PASSWORD, SHARD_TWO_DB_HOST, SHARD_TWO_DB_PORT, SHARD_TWO_DB_DATABASE),
-	// }
 
-	// for i, dsn := range dsns {
-	// 	Storage1 := cmap.New[*maxDataStruct]()
-
-	// 	db, err := sql.Open("mysql", dsn)
-	// 	if err != nil {
-	// 		log.Fatal(err)
-	// 	}
-
-	// 	db.SetMaxOpenConns(30) // 최대 연결 수 제한
-	// 	db.SetMaxIdleConns(30)  // 유휴 연결 수 제한
-
-	// 	shardKey := "shard" + strconv.Itoa(i + 1)
-
-	// 	if err = db.Ping(); err != nil {
-	// 		log.Fatal(err)
-	// 	}
-
-	// 	if _, exist := shardMap.Get(shardKey); !exist {
-	// 		shardMap.Set(shardKey, db)
-	// 		shardStorage.Set(shardKey, Storage1)
-	// 	}
-	// }
-
-	// mongo db connect
-	ctx, _ := context.WithTimeout(context.Background(), 3*time.Second)
-
-	clientOptions := options.Client().ApplyURI("mongodb://localhost:27017")
-
-	client, err := mongo.Connect(ctx, clientOptions)
-
-	shardKey := "shard1" 
-
-	err = client.Ping(ctx, readpref.Primary())
-	if err != nil {
-		log.Fatal(err)
-	}
-	Storage1 := cmap.New[*maxDataStruct]()
-
-	db := client.Database("UYeG")
-	if _, exist := shardMap.Get(shardKey); !exist {
-		shardMap.Set(shardKey, db)
-		shardStorage.Set(shardKey, Storage1)
+	dsns := []string{
+		fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_DATABASE),
+		fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", SHARD_ONE_DB_USER, SHARD_ONE_DB_PASSWORD, SHARD_ONE_DB_HOST, SHARD_ONE_DB_PORT, SHARD_ONE_DB_DATABASE),
+		// fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", SHARD_TWO_DB_USER, SHARD_TWO_DB_PASSWORD, SHARD_TWO_DB_HOST, SHARD_TWO_DB_PORT, SHARD_TWO_DB_DATABASE),
 	}
 
+	for i, dsn := range dsns {
+		Storage1 := cmap.New[*maxDataStruct]()
+
+		db, err := sql.Open("mysql", dsn)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		db.SetMaxOpenConns(30) // 최대 연결 수 제한
+		db.SetMaxIdleConns(30)  // 유휴 연결 수 제한
+
+		shardKey := "shard" + strconv.Itoa(i + 1)
+
+		if err = db.Ping(); err != nil {
+			log.Fatal(err)
+		}
+
+		if _, exist := shardMap.Get(shardKey); !exist {
+			shardMap.Set(shardKey, db)
+			shardStorage.Set(shardKey, Storage1)
+		}
+	}
 	app := fiber.New()
 	
 
@@ -632,13 +610,13 @@ func main() {
 			return c.Status(fiber.StatusBadRequest).SendString("Invalid request body")
 		}
 
-		mysqlDB, status := mysqlDBMap.Get("MYSQL_DB")
+		db, status := shardMap.Get("shard1")
 
 		if !status {
 			return c.Status(fiber.StatusBadRequest).SendString("MAIN DB connect error.")
 		}
 
-		rows, err := mysqlDB.Query("SELECT ds.dvc_id, ds.dvc_type, ds.cmpn_cd, ds.dvc_ip, ds.dvc_port, ds.dvc_remap, ds.quantity, ds.dvc_interval, ds.dvc_timeout, ds.dvc_slaveid, ds.protocol_type, cinfo.shard_key FROM t_dvc_save ds LEFT JOIN companyinfo cinfo ON ds.cmpn_cd = cinfo.cmpn_cd")
+		rows, err := db.Query("SELECT ds.dvc_id, ds.dvc_type, ds.cmpn_cd, ds.dvc_ip, ds.dvc_port, ds.dvc_remap, ds.quantity, ds.dvc_interval, ds.dvc_timeout, ds.dvc_slaveid, ds.protocol_type, cinfo.shard_key FROM t_dvc_save ds LEFT JOIN companyinfo cinfo ON ds.cmpn_cd = cinfo.cmpn_cd")
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -731,12 +709,9 @@ func main() {
 		// 	fmt.Println(*&val.maxValues)
 		// }
 
-		// for key, val := range Device_Clients.Items() {
-		// 	fmt.Printf("%v : %+v \n",key, val)
-		// }
-		// val ,_ := shardMap.Get("shard1")
-
-		// fmt.Println(val.Stats())
+		for key, val := range Device_Clients.Items() {
+			fmt.Printf("%v : %+v \n",key, val)
+		}
 
 		return c.SendString("Q")
 	})
@@ -765,7 +740,7 @@ func main() {
 			return c.Status(fiber.StatusBadRequest).SendString("잘못된 요청입니다.")
 		}
 
-		db, status := mysqlDBMap.Get("MYSQL_DB")
+		db, status := shardMap.Get("shard1")
 
 		if !status {
 			return c.Status(fiber.StatusBadRequest).SendString("MAIN DB 연결에 실패하였습니다.")
