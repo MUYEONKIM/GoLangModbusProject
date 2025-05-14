@@ -1,4 +1,5 @@
-module github.com/MUYEONKIM/GoLangModbusProject.git
+// module github.com/MUYEONKIM/GoLangModbusProject.git
+module GOPROJECT
 
 go 1.23.4
 
